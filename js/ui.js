@@ -33,6 +33,9 @@ let lastSurgeActive = false;
 let closeOnBackdrop = true;
 let lastErrorToast = 0;
 let lastTyping = 0;
+let lastHint = "";
+let comboMilestone = 0;
+let titleSecond = -1;
 
 // ------------------------------------------------------------
 // Boot
@@ -150,10 +153,15 @@ function bindEvents() {
       if (!els.modal.hidden) closeModal();
       return;
     }
-    if (e.code !== "Space" && e.key !== " ") return;
-    if (e.repeat) return;
     if (!els.modal.hidden) return;
     if (isTyping(e.target)) return;
+    if (e.repeat) return;
+    if (e.key === "e" || e.key === "E") {
+      e.preventDefault();
+      onSurge();
+      return;
+    }
+    if (e.code !== "Space" && e.key !== " ") return;
     e.preventDefault();
     onStrike();
   });
@@ -189,6 +197,19 @@ function onStrike() {
   }
   surgeWasReady = res.surgeReady;
 
+  if (res.combo > comboMilestone) {
+    if (res.combo >= 40 && comboMilestone < 40) {
+      comboMilestone = 40;
+      toast("40-strike combo — the anvil is white-hot!", "good");
+    } else if (res.combo >= 25 && comboMilestone < 25) {
+      comboMilestone = 25;
+      toast("25-strike combo — flawless rhythm!", "good");
+    } else if (res.combo >= 10 && comboMilestone < 10) {
+      comboMilestone = 10;
+      toast("10-strike combo — keep it ringing!", "good");
+    }
+  }
+
   refresh();
 }
 
@@ -199,6 +220,7 @@ function onSurge() {
     surgeWasReady = false;
     lastSurgeActive = true;
     toast(`Molten Surge! ×${fmt(res.multiplier)} ore for ${Math.round(res.duration)}s`, "good");
+    game.saveGame();
     refresh();
   } else if (game.state.surgeActive <= 0) {
     sfx.error();
@@ -218,6 +240,7 @@ function onGeneratorClick(e) {
     void row.offsetWidth;
     row.classList.add("is-bought");
     setTimeout(() => row.classList.remove("is-bought"), 380);
+    game.saveGame();
     refresh();
   } else {
     sfx.error();
@@ -245,6 +268,7 @@ function onUpgradeClick(e) {
     sfx.ach();
     toast(`Upgrade forged: ${res.upgrade.name}`, "good");
     renderUpgrades(true);
+    game.saveGame();
     refresh();
   } else {
     sfx.error();
@@ -269,6 +293,7 @@ function onRiteClick(e) {
   if (res.ok) {
     sfx.prestige();
     toast(`Rite deepened: ${res.rite.name} — level ${res.level}`, "good");
+    game.saveGame();
     refresh();
   } else if (res.reason !== "max") {
     sfx.error();
@@ -633,8 +658,53 @@ export function refresh() {
   checkNewTrophies();
   renderOwned();
   refreshBadges();
+  refreshHint();
+  refreshTitle(S);
+}
 
-  els.hint.classList.toggle("is-gone", S.clicks >= 14);
+function refreshHint() {
+  const S = game.state;
+  const hasGen = Object.values(S.gens).some((n) => n > 0);
+  const hasUpgrade = Object.keys(S.upgrades).length > 0;
+  const canBuyFirst = S.ore + 1e-6 >= GENERATORS[0].baseCost;
+  const affordableUpgrade = game.availableUpgrades().some((u) => S.ore + 1e-6 >= u.cost);
+  const next = GENERATORS.find((g, i) => i > 0 && (S.gens[g.id] || 0) === 0 && S.totalOre < g.baseCost * 0.22);
+  const surgeReady = S.surgeActive <= 0 && S.surgeCharge >= CONFIG.surgeMax;
+
+  let html = "";
+  let done = false;
+
+  if (S.clicks < 1) {
+    html = 'Strike the anvil — or press <kbd>Space</kbd>';
+  } else if (!hasGen && canBuyFirst) {
+    html = "Hire your first <b>Forge Hand</b> in the Forge list";
+  } else if (!hasGen) {
+    html = `Keep striking — <b>${fmt(Math.max(0, GENERATORS[0].baseCost - S.ore))}</b> ore to hire a Forge Hand`;
+  } else if (surgeReady) {
+    html = "<b>Molten Surge is ready</b> — unleash it below";
+  } else if (affordableUpgrade && (!hasUpgrade || S.clicks < 30)) {
+    html = "An <b>upgrade</b> is ready — open the Upgrades tab";
+  } else if (next) {
+    html = `Next: <b>${next.name}</b> at ${fmt(next.baseCost * 0.22)} lifetime ore`;
+  } else if (S.clicks < 14) {
+    html = "Rapid strikes build a <b>combo</b>";
+  } else {
+    done = true;
+  }
+
+  els.hint.classList.toggle("is-gone", done);
+  if (html !== lastHint) {
+    lastHint = html;
+    els.hint.innerHTML = html;
+  }
+}
+
+function refreshTitle(S) {
+  const sec = Math.floor(Date.now() / 1000);
+  if (sec === titleSecond) return;
+  titleSecond = sec;
+  const label = `Emberforge — ${fmt(S.ore)} ore`;
+  if (document.title !== label) document.title = label;
 }
 
 function refreshEmbers(st) {
@@ -651,9 +721,17 @@ function refreshEmbers(st) {
 
   els.btnRekindle.disabled = !ready;
   els.btnRekindle.textContent = ready ? `Rekindle · +${fmtWhole(gain)} embers` : "Rekindle";
-  els.rekindleHint.textContent = ready
-    ? "Ore, generators and upgrades reset. Embers, rites and trophies are kept."
-    : `Earn at least ${CONFIG.emberMin} embers in a single run to rekindle.`;
+  if (ready) {
+    els.rekindleHint.textContent = "Ore, generators and upgrades reset. Embers, rites and trophies are kept.";
+  } else {
+    const target = Math.pow(CONFIG.emberMin / CONFIG.emberBase, 2) * CONFIG.emberDivisor;
+    els.rekindleHint.textContent = `${fmt(S.runOre)} / ${fmt(target)} run ore until the first rekindle.`;
+  }
+
+  const nextEmber = Math.pow((gain + 1) / CONFIG.emberBase, 2) * CONFIG.emberDivisor;
+  els.emberGain.title = ready
+    ? `${fmtWhole(gain)} embers waiting — rekindle to claim them.`
+    : `Next ember at ${fmt(nextEmber)} run ore.`;
 }
 
 function refreshSurge(st) {
@@ -666,6 +744,14 @@ function refreshSurge(st) {
   els.surgeBtn.classList.toggle("is-active", active);
   els.surgeBtn.classList.toggle("is-ready", ready);
   els.app.classList.toggle("is-surging", active);
+  els.surgeBtn.setAttribute(
+    "aria-label",
+    active
+      ? `Molten Surge active, ${Math.ceil(S.surgeActive)} seconds left`
+      : ready
+        ? "Molten Surge ready — activate"
+        : `Molten Surge, ${Math.floor(charge)} percent charged`,
+  );
 
   if (active) {
     els.surgeState.textContent = `${Math.ceil(S.surgeActive)}s`;
@@ -687,7 +773,10 @@ function refreshCombo(st) {
   const S = game.state;
   const show = S.combo > 0;
   els.combo.hidden = !show;
-  if (!show) return;
+  if (!show) {
+    comboMilestone = 0;
+    return;
+  }
   const bonus = 1 + S.combo * st.comboBonus;
   els.comboValue.textContent = `×${bonus.toFixed(2)}`;
   els.comboFill.style.width = `${clamp(S.comboTimer / CONFIG.comboWindow, 0, 1) * 100}%`;
@@ -746,6 +835,7 @@ function onVeinClick(e) {
     floatAt(x, y - 12, "+" + fmt(res.gain), "vein");
   }
   sfx.vein();
+  game.saveGame();
   toast(`Ore vein shattered — +${fmt(res.gain)} ore`, "good");
 
   if (veinEl) {
@@ -879,14 +969,14 @@ function openHelp() {
     body: `
       <p><b>Hammer the anvil</b> to earn ore. Fast strikes build a <b>combo</b>; lucky strikes <b>crit</b> for a big burst.</p>
       <ul>
-        <li>Buy <b>generators</b> below — they produce ore even while you rest.</li>
+        <li>Buy <b>generators</b> in the Forge list — they produce ore even while you rest.</li>
         <li><b>Upgrades</b> multiply your forge. You keep them until you rekindle.</li>
         <li>Click glowing <b>ore veins</b>: they pay a burst of ore and charge your surge.</li>
         <li>Fill the <b>Molten Surge</b> meter with strikes, then unleash it for a huge temporary multiplier.</li>
         <li><b>Rekindle</b> when a run is worth 5+ embers. Embers and rites make every future run faster.</li>
         <li>The forge keeps working <b>offline</b>, up to 8 hours (more with upgrades and rites).</li>
       </ul>
-      <p><b>Space</b> hammers too. Your progress saves automatically in this browser — use Export for a backup.</p>`,
+      <p><b>Space</b> hammers too, and <b>E</b> unleashes a charged surge. Your progress saves automatically in this browser — use Export for a backup.</p>`,
     actions: [{ label: "Back to the anvil", kind: "primary" }],
   });
 }
